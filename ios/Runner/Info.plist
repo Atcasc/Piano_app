@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE PLIST PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ... Resto de claves por defecto de Flutter ... -->
+
+    <!-- Permiso para interactuar con accesorios de audio/MIDI externos conectados por USB -->
+    <key>UISupportedExternalAccessoryProtocols</key>
+    <array>
+        <string>com.apple.midi</string>
+    </array>
+
+    <!-- Permitir ejecución de MIDI/Audio en segundo plano (Opcional pero recomendable) -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+
+</dict>
+</plist>
