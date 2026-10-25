@@ -11,18 +11,6 @@ dependencies:
   flutter:
     sdk: flutter
   
-  # Paquete principal para comunicación MIDI (Plug & Play, eventos NoteOn/Off)
   flutter_midi_command: ^0.4.8
-  
-  # Iconos de Cupertino para diseño iOS
-  cupertino_icons: ^1.0.8
-
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
-  flutter_lints: ^4.0.0
-
-flutter:
-  uses-material-design: true
-flutter_midi: ^0.1.7
+  flutter_midi: ^0.1.7
   cupertino_icons: ^1.0.8
