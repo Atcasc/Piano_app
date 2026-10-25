@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_midi_command/flutter_midi_command.dart';
 
@@ -13,7 +14,7 @@ class PianoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Piano Trainer USB',
+      title: 'Piano Trainer - Fase 4',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -22,19 +23,31 @@ class PianoApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const PianoScreen(),
+      home: const ChordTrainerScreen(),
     );
   }
 }
 
-class PianoScreen extends StatefulWidget {
-  const PianoScreen({super.key});
+class ChordDefinition {
+  final String name; // Ej: "C", "Cm", "C7"
+  final String displayName; // Ej: "Do Mayor", "Do Menor", "Do Séptima"
+  final List<int> intervals; // Intervalos relativos desde la tónica (ej: [0, 4, 7] para Mayor)
 
-  @override
-  State<PianoScreen> createState() => _PianoScreenState();
+  const ChordDefinition({
+    required this.name,
+    required this.displayName,
+    required this.intervals,
+  });
 }
 
-class _PianoScreenState extends State<PianoScreen> {
+class ChordTrainerScreen extends StatefulWidget {
+  const ChordTrainerScreen({super.key});
+
+  @override
+  State<ChordTrainerScreen> createState() => _ChordTrainerScreenState();
+}
+
+class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
   final MidiCommand _midiCommand = MidiCommand();
   StreamSubscription<MidiPacket>? _midiDataSubscription;
   StreamSubscription<String>? _midiSetupSubscription;
@@ -42,22 +55,32 @@ class _PianoScreenState extends State<PianoScreen> {
   MidiDevice? _connectedDevice;
   bool _isConnected = false;
 
-  // Usamos un Set para almacenar las notas MIDI que están presionadas actualmente (Soporte Multi-Nota / Acordes)
   final Set<int> _activeNotes = {};
-  int _lastVelocity = 0;
 
-  // Nombres musicales
-  static const List<String> _noteNamesEnglish = [
-    'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'
-  ];
-  static const List<String> _noteNamesSolfege = [
-    'DO', 'DO#', 'RE', 'RE#', 'MI', 'FA', 'FA#', 'SOL', 'SOL#', 'LA', 'LA#', 'SI'
+  // Reto de Acordes
+  String? _targetChordName;
+  List<int> _targetChordNotes = [];
+  int _score = 0;
+  String _feedbackMessage = 'Toca el acorde indicado en el piano';
+  Color _feedbackColor = Colors.grey;
+
+  // Banco de acordes básicos de práctica (Construidos sobre la octava 4)
+  static const List<Map<String, dynamic>> _chordDatabase = [
+    {'root': 60, 'name': 'C', 'display': 'DO Mayor', 'intervals': [0, 4, 7]},
+    {'root': 60, 'name': 'Cm', 'display': 'DO Menor', 'intervals': [0, 3, 7]},
+    {'root': 60, 'name': 'C7', 'display': 'DO Séptima', 'intervals': [0, 4, 7, 10]},
+    {'root': 62, 'name': 'D', 'display': 'RE Mayor', 'intervals': [0, 4, 7]},
+    {'root': 62, 'name': 'Dm', 'display': 'RE Menor', 'intervals': [0, 3, 7]},
+    {'root': 65, 'name': 'F', 'display': 'FA Mayor', 'intervals': [0, 4, 7]},
+    {'root': 67, 'name': 'G', 'display': 'SOL Mayor', 'intervals': [0, 4, 7]},
+    {'root': 69, 'name': 'Am', 'display': 'LA Menor', 'intervals': [0, 3, 7]},
   ];
 
   @override
   void initState() {
     super.initState();
     _initMidi();
+    _generateNewTargetChord();
   }
 
   void _initMidi() {
@@ -74,7 +97,6 @@ class _PianoScreenState extends State<PianoScreen> {
 
   Future<void> _checkConnectedDevices() async {
     List<MidiDevice>? devices = await _midiCommand.devices;
-
     if (devices != null && devices.isNotEmpty) {
       MidiDevice device = devices.first;
       if (_connectedDevice == null || _connectedDevice!.id != device.id) {
@@ -93,6 +115,21 @@ class _PianoScreenState extends State<PianoScreen> {
     }
   }
 
+  void _generateNewTargetChord() {
+    final random = Random();
+    final chordInfo = _chordDatabase[random.nextInt(_chordDatabase.length)];
+    
+    int rootNote = chordInfo['root'];
+    List<int> intervals = chordInfo['intervals'];
+
+    setState(() {
+      _targetChordName = chordInfo['display'];
+      _targetChordNotes = intervals.map((interval) => rootNote + interval).toList();
+      _feedbackMessage = '¡Toca el acorde de $_targetChordName!';
+      _feedbackColor = Colors.cyanAccent;
+    });
+  }
+
   void _processMidiPacket(MidiPacket packet) {
     final List<int> data = packet.data;
     if (data.length < 3) return;
@@ -102,16 +139,36 @@ class _PianoScreenState extends State<PianoScreen> {
     int velocity = data[2];
 
     setState(() {
-      // Note On
       if (status == 0x90 && velocity > 0) {
         _activeNotes.add(noteNumber);
-        _lastVelocity = velocity;
-      } 
-      // Note Off (o Note On con velocity 0)
-      else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
+        _evaluateChord();
+      } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
         _activeNotes.remove(noteNumber);
       }
     });
+  }
+
+  /// Compara si el conjunto de notas presionadas coincide exactamente con el acorde objetivo
+  void _evaluateChord() {
+    if (_targetChordNotes.isEmpty) return;
+
+    // Verificamos si todas las notas del acorde objetivo están contenidas en las notas activas
+    bool matches = _targetChordNotes.every((note) => _activeNotes.contains(note)) &&
+                   _activeNotes.length == _targetChordNotes.length;
+
+    if (matches) {
+      setState(() {
+        _score += 20;
+        _feedbackMessage = '¡Acorde Correcto! 🎉';
+        _feedbackColor = Colors.greenAccent;
+      });
+
+      Timer(const Duration(milliseconds: 800), () {
+        if (mounted) {
+          _generateNewTargetChord();
+        }
+      });
+    }
   }
 
   @override
@@ -125,31 +182,59 @@ class _PianoScreenState extends State<PianoScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Piano Virtual - Fase 2'),
+        title: const Text('Entrenador de Acordes - Fase 4'),
         centerTitle: true,
+        actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Text(
+                'Puntuación: $_score',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.amberAccent),
+              ),
+            ),
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // 1. Estado de conexión superior
           Padding(
-            padding: const EdgeInsets.all(16.0),
+            padding: const EdgeInsets.all(12.0),
             child: _buildConnectionStatusCard(),
           ),
-
-          // 2. Panel de información de la última nota tocada
           Expanded(
             flex: 2,
             child: Center(
-              child: _buildActiveNotesDisplay(),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    'ACORDE OBJETIVO:',
+                    style: TextStyle(fontSize: 14, color: Colors.grey, letterSpacing: 1.5),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    _targetChordName ?? '--',
+                    style: const TextStyle(fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    _feedbackMessage,
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: _feedbackColor),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
             ),
           ),
-
-          // 3. Teclado Virtual Interactivo (Piano Roll en pantalla)
           Container(
-            height: 220,
+            height: 200,
             padding: const EdgeInsets.symmetric(vertical: 12),
             color: Colors.black54,
-            child: InteractivePianoKeyboard(activeNotes: _activeNotes),
+            child: InteractivePianoKeyboard(
+              activeNotes: _activeNotes,
+              targetNotes: _targetChordNotes,
+            ),
           ),
         ],
       ),
@@ -166,58 +251,29 @@ class _PianoScreenState extends State<PianoScreen> {
           color: _isConnected ? Colors.greenAccent : Colors.redAccent,
         ),
         title: Text(
-          _isConnected ? 'Piano Conectado: ${_connectedDevice?.name ?? ""}' : 'Desconectado (Conecta por USB)',
-          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+          _isConnected ? 'Piano Conectado: ${_connectedDevice?.name ?? ""}' : 'Modo simulación / Sin piano USB',
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
         ),
       ),
     );
   }
-
-  Widget _buildActiveNotesDisplay() {
-    if (_activeNotes.isEmpty) {
-      return const Text(
-        'Toca una tecla en tu piano físico...',
-        style: TextStyle(fontSize: 18, color: Colors.grey),
-      );
-    }
-
-    // Convertir las notas activas a texto legible
-    String notesText = _activeNotes.map((noteNumber) {
-      int index = noteNumber % 12;
-      int octave = (noteNumber ~/ 12) - 1;
-      return '${_noteNamesEnglish[index]}$octave (${_noteNamesSolfege[index]})';
-    }).join(', ');
-
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const Text('Notas Activas:', style: TextStyle(color: Colors.grey, fontSize: 14)),
-        const SizedBox(height: 8),
-        Text(
-          notesText,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.cyanAccent),
-        ),
-        const SizedBox(height: 12),
-        Text('Velocity: $_lastVelocity', style: const TextStyle(color: Colors.white54)),
-      ],
-    );
-  }
 }
 
-/// Widget personalizado que dibuja un teclado de piano interactivo (Rango de 2 octavas: C4 a C6 por defecto)
 class InteractivePianoKeyboard extends StatelessWidget {
   final Set<int> activeNotes;
+  final List<int> targetNotes;
 
-  // Definimos el rango visual: desde C4 (MIDI 60) hasta C6 (MIDI 84) -> 25 notas
-  static const int startNote = 60; // C4 / DO Central
-  static const int totalKeys = 25;  // 2 octavas completas + 1 nota final
+  static const int startNote = 60;
+  static const int totalKeys = 25;
 
-  const InteractivePianoKeyboard({super.key, required this.asyncActiveNotes, required this.activeNotes});
+  const InteractivePianoKeyboard({
+    super.key,
+    required this.activeNotes,
+    required this.targetNotes,
+  });
 
   @override
   Widget build(BuildContext context) {
-    // Calculamos las teclas blancas dentro del rango para distribuirlas en fila
     List<int> whiteKeys = [];
     for (int i = 0; i < totalKeys; i++) {
       int note = startNote + i;
@@ -235,34 +291,36 @@ class InteractivePianoKeyboard extends StatelessWidget {
 
         return Stack(
           children: [
-            // 1. Capa de Teclas Blancas
             Row(
               children: whiteKeys.map((noteNumber) {
                 bool isActive = activeNotes.contains(noteNumber);
+                bool isTarget = targetNotes.contains(noteNumber);
+
+                Color keyColor = Colors.white;
+                if (isActive) {
+                  keyColor = Colors.deepPurpleAccent;
+                } else if (isTarget) {
+                  keyColor = Colors.cyan.shade100;
+                }
+
                 return Container(
                   width: whiteKeyWidth,
                   height: whiteKeyHeight,
                   margin: const EdgeInsets.symmetric(horizontal: 1),
                   decoration: BoxDecoration(
-                    color: isActive ? Colors.deepPurpleAccent : Colors.white,
+                    color: keyColor,
                     borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
-                    border: Border.all(color: Colors.grey.shade400, width: 1),
+                    border: Border.all(color: isTarget ? Colors.cyan : Colors.grey.shade400, width: 1),
                   ),
                   alignment: Alignment.bottomCenter,
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Text(
                     _getNoteLabel(noteNumber),
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                      color: isActive ? Colors.white : Colors.black87,
-                    ),
+                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.black87),
                   ),
                 );
               }).toList(),
             ),
-
-            // 2. Capa de Teclas Negras (Superpuestas con posicionamiento absoluto)
             ..._buildBlackKeys(startNote, totalKeys, whiteKeyWidth, blackKeyWidth, blackKeyHeight),
           ],
         );
@@ -278,7 +336,7 @@ class InteractivePianoKeyboard extends StatelessWidget {
   String _getNoteLabel(int noteNumber) {
     if (noteNumber % 12 == 0) {
       int octave = (noteNumber ~/ 12) - 1;
-      return 'C$octave'; // Etiqueta los Do (C4, C5...)
+      return 'C$octave';
     }
     return '';
   }
@@ -290,11 +348,18 @@ class InteractivePianoKeyboard extends StatelessWidget {
     for (int i = 0; i < total; i++) {
       int note = start + i;
       if (_isBlackKey(note)) {
-        // Posicionar la tecla negra exactamente entre las teclas blancas correspondientes
         double leftPosition = (whiteIndex * whiteWidth) - (blackWidth / 2) + (whiteWidth * 0.7);
         bool isActive = activeNotes.contains(note);
+        bool isTarget = targetNotes.contains(note);
 
-        blackKeyWidgets.append(
+        Color blackColor = Colors.black;
+        if (isActive) {
+          blackColor = Colors.cyanAccent;
+        } else if (isTarget) {
+          blackColor = Colors.orange.shade300;
+        }
+
+        blackKeyWidgets.add(
           Positioned(
             left: leftPosition,
             top: 0,
@@ -302,14 +367,10 @@ class InteractivePianoKeyboard extends StatelessWidget {
               width: blackWidth,
               height: blackHeight,
               decoration: BoxDecoration(
-                color: isActive ? Colors.cyanAccent : Colors.black,
+                color: blackColor,
                 borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4)),
                 boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.3),
-                    blurRadius: 3,
-                    offset: const Offset(0, 2),
-                  ),
+                  BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 3, offset: const Offset(0, 2)),
                 ],
               ),
             ),
