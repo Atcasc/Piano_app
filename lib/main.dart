@@ -22,36 +22,31 @@ class PianoApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MidiMonitorScreen(),
+      home: const PianoScreen(),
     );
   }
 }
 
-class MidiMonitorScreen extends StatefulWidget {
-  const MidiMonitorScreen({super.key});
+class PianoScreen extends StatefulWidget {
+  const PianoScreen({super.key});
 
   @override
-  State<MidiMonitorScreen> createState() => _MidiMonitorScreenState();
+  State<PianoScreen> createState() => _PianoScreenState();
 }
 
-class _MidiMonitorScreenState extends State<MidiMonitorScreen> {
-  // Instancia principal del plugin flutter_midi_command
+class _PianoScreenState extends State<PianoScreen> {
   final MidiCommand _midiCommand = MidiCommand();
-
-  // Suscripciones a los streams del plugin
   StreamSubscription<MidiPacket>? _midiDataSubscription;
   StreamSubscription<String>? _midiSetupSubscription;
 
-  // Variables de estado de la app
   MidiDevice? _connectedDevice;
   bool _isConnected = false;
-  String _lastNoteName = "--";
-  String _lastNoteSolfege = "--";
-  int _lastOctave = 0;
-  int _lastVelocity = 0;
-  bool _isNoteActive = false;
 
-  // Nombres de las notas musicales en notación Cifra (Anglosajona) y Solfeo
+  // Usamos un Set para almacenar las notas MIDI que están presionadas actualmente (Soporte Multi-Nota / Acordes)
+  final Set<int> _activeNotes = {};
+  int _lastVelocity = 0;
+
+  // Nombres musicales
   static const List<String> _noteNamesEnglish = [
     'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'
   ];
@@ -65,31 +60,23 @@ class _MidiMonitorScreenState extends State<MidiMonitorScreen> {
     _initMidi();
   }
 
-  /// Inicialización y escucha de eventos MIDI
   void _initMidi() {
-    // 1. Escuchar cambios de estado en las conexiones Plug & Play (conectar/desconectar cable USB)
     _midiSetupSubscription = _midiCommand.onMidiSetupChanged?.listen((data) {
-      debugPrint("Cambio en dispositivos MIDI detectado: $data");
       _checkConnectedDevices();
     });
 
-    // 2. Escuchar la transmisión de datos MIDI en tiempo real
     _midiDataSubscription = _midiCommand.onMidiDataReceived?.listen((MidiPacket packet) {
       _processMidiPacket(packet);
     });
 
-    // 3. Revisar si el piano ya está conectado al arrancar la app
     _checkConnectedDevices();
   }
 
-  /// Revisa la lista de dispositivos MIDI USB disponibles y se conecta al primero disponible
   Future<void> _checkConnectedDevices() async {
     List<MidiDevice>? devices = await _midiCommand.devices;
 
     if (devices != null && devices.isNotEmpty) {
       MidiDevice device = devices.first;
-      
-      // Conectar automáticamente al piano detectado
       if (_connectedDevice == null || _connectedDevice!.id != device.id) {
         _midiCommand.connectToDevice(device);
         setState(() {
@@ -98,61 +85,37 @@ class _MidiMonitorScreenState extends State<MidiMonitorScreen> {
         });
       }
     } else {
-      // No hay dispositivos conectados
       setState(() {
         _connectedDevice = null;
         _isConnected = false;
+        _activeNotes.clear();
       });
     }
   }
 
-  /// Procesa los paquetes binarios MIDI recibidos del teclado
-  /// Estructura estándar MIDI:
-  /// Byte 0: Status Byte (Ej: 0x90 = Note On, 0x80 = Note Off)
-  /// Byte 1: Note Number (0 - 127) -> 60 es C4 / DO Central
-  /// Byte 2: Velocity (0 - 127) -> Fuerza con la que se presiona la tecla
   void _processMidiPacket(MidiPacket packet) {
     final List<int> data = packet.data;
-
-    // Validación básica de protocolo MIDI
     if (data.length < 3) return;
 
-    int status = data[0] & 0xF0; // Máscara para obtener el tipo de comando ignorando el canal
+    int status = data[0] & 0xF0;
     int noteNumber = data[1];
     int velocity = data[2];
 
-    // Status 0x90 = Note On (Nota Presionada)
-    // Nota: Algunos pianos envían Note On con Velocity = 0 en lugar de Note Off
-    if (status == 0x90 && velocity > 0) {
-      _updateNoteUI(noteNumber, velocity, isPressed: true);
-    } 
-    // Status 0x80 = Note Off (Nota Soltada)
-    else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
-      _updateNoteUI(noteNumber, 0, isPressed: false);
-    }
-  }
-
-  /// Convierte el número MIDI (0-127) a nota, octava y nombre visual
-  void _updateNoteUI(int noteNumber, int velocity, {required bool isPressed}) {
-    // El índice de la nota dentro de la octava (0 = C/DO, 1 = C#/DO#, ..., 11 = B/SI)
-    int noteIndex = noteNumber % 12;
-    // Cálculo de la octava (MIDI 60 = C4)
-    int octave = (noteNumber ~/ 12) - 1;
-
     setState(() {
-      _isNoteActive = isPressed;
-      if (isPressed) {
-        _lastNoteName = _noteNamesEnglish[noteIndex];
-        _lastNoteSolfege = _noteNamesSolfege[noteIndex];
-        _lastOctave = octave;
+      // Note On
+      if (status == 0x90 && velocity > 0) {
+        _activeNotes.add(noteNumber);
         _lastVelocity = velocity;
+      } 
+      // Note Off (o Note On con velocity 0)
+      else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
+        _activeNotes.remove(noteNumber);
       }
     });
   }
 
   @override
   void dispose() {
-    // Cancelar suscripciones para evitar fugas de memoria (Memory Leaks)
     _midiDataSubscription?.cancel();
     _midiSetupSubscription?.cancel();
     super.dispose();
@@ -162,132 +125,200 @@ class _MidiMonitorScreenState extends State<MidiMonitorScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Piano MIDI Connector'),
+        title: const Text('Piano Virtual - Fase 2'),
         centerTitle: true,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Indicador de Estado de Conexión USB
-            _buildConnectionStatusCard(),
-
-            const Spacer(),
-
-            // Visualización de la Nota en Tiempo Real
-            _buildNoteDisplay(),
-
-            const Spacer(),
-
-            // Indicador visual de la Intensidad/Fuerza (Velocity)
-            _buildVelocityBar(),
-            
-            const SizedBox(height: 20),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Widget para mostrar el estado de la conexión USB y nombre del piano
-  Widget _buildConnectionStatusCard() {
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      color: _isConnected ? Colors.green.withOpacity(0.15) : Colors.red.withOpacity(0.15),
-      child: ListTile(
-        leading: Icon(
-          _isConnected ? Icons.usb_rounded : Icons.usb_off_rounded,
-          color: _isConnected ? Colors.greenAccent : Colors.redAccent,
-          size: 32,
-        ),
-        title: Text(
-          _isConnected ? 'Piano Conectado' : 'Sin conexión USB',
-          style: const TextStyle(fontWeight: FontWeight.bold),
-        ),
-        subtitle: Text(
-          _isConnected 
-              ? (_connectedDevice?.name ?? 'Dispositivo MIDI USB') 
-              : 'Conecta tu piano digital con un cable USB',
-          style: const TextStyle(fontSize: 12),
-        ),
-      ),
-    );
-  }
-
-  /// Widget central que muestra la nota actual en pantalla
-  Widget _buildNoteDisplay() {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 100),
-      padding: const EdgeInsets.all(32),
-      decoration: BoxDecoration(
-        color: _isNoteActive ? Colors.deepPurple.shade700 : Colors.grey.shade900,
-        shape: BoxShape.circle,
-        boxShadow: _isNoteActive
-            ? [
-                BoxShadow(
-                  color: Colors.deepPurpleAccent.withOpacity(0.6),
-                  blurRadius: 30,
-                  spreadRadius: 10,
-                )
-              ]
-            : [],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      body: Column(
         children: [
-          // Nota en Cifra + Octava (Ejemplo: C4 / G#3)
-          Text(
-            _isNoteActive ? '$_lastNoteName$_lastOctave' : '--',
-            style: TextStyle(
-              fontSize: 64,
-              fontWeight: FontWeight.bold,
-              color: _isNoteActive ? Colors.white : Colors.grey,
+          // 1. Estado de conexión superior
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: _buildConnectionStatusCard(),
+          ),
+
+          // 2. Panel de información de la última nota tocada
+          Expanded(
+            flex: 2,
+            child: Center(
+              child: _buildActiveNotesDisplay(),
             ),
           ),
-          const SizedBox(height: 8),
-          // Nota en Solfeo (Ejemplo: DO4 / SOL#3)
-          Text(
-            _isNoteActive ? '$_lastNoteSolfege$_lastOctave' : 'Toca una tecla',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w500,
-              color: _isNoteActive ? Colors.white70 : Colors.grey.shade600,
-            ),
+
+          // 3. Teclado Virtual Interactivo (Piano Roll en pantalla)
+          Container(
+            height: 220,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            color: Colors.black54,
+            child: InteractivePianoKeyboard(activeNotes: _activeNotes),
           ),
         ],
       ),
     );
   }
 
-  /// Barra de progreso para indicar la intensidad de la pulsación (Velocity 0 a 127)
-  Widget _buildVelocityBar() {
+  Widget _buildConnectionStatusCard() {
+    return Card(
+      elevation: 2,
+      color: _isConnected ? Colors.green.withOpacity(0.15) : Colors.red.withOpacity(0.15),
+      child: ListTile(
+        leading: Icon(
+          _isConnected ? Icons.usb_rounded : Icons.usb_off_rounded,
+          color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+        ),
+        title: Text(
+          _isConnected ? 'Piano Conectado: ${_connectedDevice?.name ?? ""}' : 'Desconectado (Conecta por USB)',
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActiveNotesDisplay() {
+    if (_activeNotes.isEmpty) {
+      return const Text(
+        'Toca una tecla en tu piano físico...',
+        style: TextStyle(fontSize: 18, color: Colors.grey),
+      );
+    }
+
+    // Convertir las notas activas a texto legible
+    String notesText = _activeNotes.map((noteNumber) {
+      int index = noteNumber % 12;
+      int octave = (noteNumber ~/ 12) - 1;
+      return '${_noteNamesEnglish[index]}$octave (${_noteNamesSolfege[index]})';
+    }).join(', ');
+
     return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text("Intensidad (Velocity):", style: TextStyle(color: Colors.grey)),
-            Text(
-              "$_lastVelocity / 127",
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
+        const Text('Notas Activas:', style: TextStyle(color: Colors.grey, fontSize: 14)),
         const SizedBox(height: 8),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: LinearProgressIndicator(
-            value: _lastVelocity / 127.0,
-            minHeight: 12,
-            backgroundColor: Colors.grey.shade800,
-            valueColor: AlwaysStoppedAnimation<Color>(
-              _lastVelocity > 100 ? Colors.redAccent : Colors.deepPurpleAccent,
-            ),
-          ),
+        Text(
+          notesText,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.cyanAccent),
         ),
+        const SizedBox(height: 12),
+        Text('Velocity: $_lastVelocity', style: const TextStyle(color: Colors.white54)),
       ],
     );
+  }
+}
+
+/// Widget personalizado que dibuja un teclado de piano interactivo (Rango de 2 octavas: C4 a C6 por defecto)
+class InteractivePianoKeyboard extends StatelessWidget {
+  final Set<int> activeNotes;
+
+  // Definimos el rango visual: desde C4 (MIDI 60) hasta C6 (MIDI 84) -> 25 notas
+  static const int startNote = 60; // C4 / DO Central
+  static const int totalKeys = 25;  // 2 octavas completas + 1 nota final
+
+  const InteractivePianoKeyboard({super.key, required this.asyncActiveNotes, required this.activeNotes});
+
+  @override
+  Widget build(BuildContext context) {
+    // Calculamos las teclas blancas dentro del rango para distribuirlas en fila
+    List<int> whiteKeys = [];
+    for (int i = 0; i < totalKeys; i++) {
+      int note = startNote + i;
+      if (!_isBlackKey(note)) {
+        whiteKeys.add(note);
+      }
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        double whiteKeyWidth = constraints.maxWidth / whiteKeys.length;
+        double whiteKeyHeight = constraints.maxHeight;
+        double blackKeyWidth = whiteKeyWidth * 0.65;
+        double blackKeyHeight = whiteKeyHeight * 0.6;
+
+        return Stack(
+          children: [
+            // 1. Capa de Teclas Blancas
+            Row(
+              children: whiteKeys.map((noteNumber) {
+                bool isActive = activeNotes.contains(noteNumber);
+                return Container(
+                  width: whiteKeyWidth,
+                  height: whiteKeyHeight,
+                  margin: const EdgeInsets.symmetric(horizontal: 1),
+                  decoration: BoxDecoration(
+                    color: isActive ? Colors.deepPurpleAccent : Colors.white,
+                    borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
+                    border: Border.all(color: Colors.grey.shade400, width: 1),
+                  ),
+                  alignment: Alignment.bottomCenter,
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    _getNoteLabel(noteNumber),
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: isActive ? Colors.white : Colors.black87,
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+
+            // 2. Capa de Teclas Negras (Superpuestas con posicionamiento absoluto)
+            ..._buildBlackKeys(startNote, totalKeys, whiteKeyWidth, blackKeyWidth, blackKeyHeight),
+          ],
+        );
+      },
+    );
+  }
+
+  bool _isBlackKey(int noteNumber) {
+    int rem = noteNumber % 12;
+    return rem == 1 || rem == 3 || rem == 6 || rem == 8 || rem == 10;
+  }
+
+  String _getNoteLabel(int noteNumber) {
+    if (noteNumber % 12 == 0) {
+      int octave = (noteNumber ~/ 12) - 1;
+      return 'C$octave'; // Etiqueta los Do (C4, C5...)
+    }
+    return '';
+  }
+
+  List<Widget> _buildBlackKeys(int start, int total, double whiteWidth, double blackWidth, double blackHeight) {
+    List<Widget> blackKeyWidgets = [];
+    int whiteIndex = 0;
+
+    for (int i = 0; i < total; i++) {
+      int note = start + i;
+      if (_isBlackKey(note)) {
+        // Posicionar la tecla negra exactamente entre las teclas blancas correspondientes
+        double leftPosition = (whiteIndex * whiteWidth) - (blackWidth / 2) + (whiteWidth * 0.7);
+        bool isActive = activeNotes.contains(note);
+
+        blackKeyWidgets.append(
+          Positioned(
+            left: leftPosition,
+            top: 0,
+            child: Container(
+              width: blackWidth,
+              height: blackHeight,
+              decoration: BoxDecoration(
+                color: isActive ? Colors.cyanAccent : Colors.black,
+                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 3,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      } else {
+        whiteIndex++;
+      }
+    }
+    return blackKeyWidgets;
   }
 }
