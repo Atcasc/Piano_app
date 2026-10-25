@@ -12,5 +12,5 @@ dependencies:
     sdk: flutter
   
   flutter_midi_command: ^0.4.8
-  flutter_midi: ^0.1.7
+  flutter_midi: ^1.0.0
   cupertino_icons: ^1.0.8
