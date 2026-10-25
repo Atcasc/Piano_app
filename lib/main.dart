@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_midi_command/flutter_midi_command.dart';
+import 'package:flutter_midi/flutter_midi.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,7 +14,7 @@ class PianoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Piano Trainer - Fase 4',
+      title: 'Piano Trainer - Fase 6 (Canciones)',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -23,64 +23,58 @@ class PianoApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const ChordTrainerScreen(),
+      home: const SongPracticeScreen(),
     );
   }
 }
 
-class ChordDefinition {
-  final String name; // Ej: "C", "Cm", "C7"
-  final String displayName; // Ej: "Do Mayor", "Do Menor", "Do Séptima"
-  final List<int> intervals; // Intervalos relativos desde la tónica (ej: [0, 4, 7] para Mayor)
-
-  const ChordDefinition({
-    required this.name,
-    required this.displayName,
-    required this.intervals,
-  });
-}
-
-class ChordTrainerScreen extends StatefulWidget {
-  const ChordTrainerScreen({super.key});
+class SongPracticeScreen extends StatefulWidget {
+  const SongPracticeScreen({super.key});
 
   @override
-  State<ChordTrainerScreen> createState() => _ChordTrainerScreenState();
+  State<SongPracticeScreen> createState() => _SongPracticeScreenState();
 }
 
-class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
+class _SongPracticeScreenState extends State<SongPracticeScreen> {
   final MidiCommand _midiCommand = MidiCommand();
+  final FlutterMidi _flutterMidi = FlutterMidi();
+
   StreamSubscription<MidiPacket>? _midiDataSubscription;
   StreamSubscription<String>? _midiSetupSubscription;
 
   MidiDevice? _connectedDevice;
   bool _isConnected = false;
+  bool _isSoundLoaded = false;
 
   final Set<int> _activeNotes = {};
 
-  // Reto de Acordes
-  String? _targetChordName;
-  List<int> _targetChordNotes = [];
-  int _score = 0;
-  String _feedbackMessage = 'Toca el acorde indicado en el piano';
-  Color _feedbackColor = Colors.grey;
-
-  // Banco de acordes básicos de práctica (Construidos sobre la octava 4)
-  static const List<Map<String, dynamic>> _chordDatabase = [
-    {'root': 60, 'name': 'C', 'display': 'DO Mayor', 'intervals': [0, 4, 7]},
-    {'root': 60, 'name': 'Cm', 'display': 'DO Menor', 'intervals': [0, 3, 7]},
-    {'root': 60, 'name': 'C7', 'display': 'DO Séptima', 'intervals': [0, 4, 7, 10]},
-    {'root': 62, 'name': 'D', 'display': 'RE Mayor', 'intervals': [0, 4, 7]},
-    {'root': 62, 'name': 'Dm', 'display': 'RE Menor', 'intervals': [0, 3, 7]},
-    {'root': 65, 'name': 'F', 'display': 'FA Mayor', 'intervals': [0, 4, 7]},
-    {'root': 67, 'name': 'G', 'display': 'SOL Mayor', 'intervals': [0, 4, 7]},
-    {'root': 69, 'name': 'Am', 'display': 'LA Menor', 'intervals': [0, 3, 7]},
-  ];
+  // Definición de una canción de práctica (Secuencia de notas MIDI)
+  // Ejemplo: "Estrellita, ¿dónde estás?" (C4, C4, G4, G4, A4, A4, G4...)
+  // C4 = 60, D4 = 62, E4 = 64, F4 = 65, G4 = 67, A4 = 69
+  final List<int> _songNotes = [60, 60, 67, 67, 69, 69, 67, 65, 65, 64, 64, 62, 62, 60];
+  final List<String> _songNoteNames = ['DO', 'DO', 'SOL', 'SOL', 'LA', 'LA', 'SOL', 'FA', 'FA', 'MI', 'MI', 'RE', 'RE', 'DO'];
+  
+  int _currentNoteIndex = 0;
+  bool _songCompleted = false;
+  String _feedbackMessage = 'Toca la primera nota de la canción';
+  Color _feedbackColor = Colors.cyanAccent;
 
   @override
   void initState() {
     super.initState();
+    _initAudioSynthesizer();
     _initMidi();
-    _generateNewTargetChord();
+  }
+
+  Future<void> _initAudioSynthesizer() async {
+    try {
+      await _flutterMidi.unmute();
+      setState(() {
+        _isSoundLoaded = true;
+      });
+    } catch (e) {
+      debugPrint("Error sintetizador: $e");
+    }
   }
 
   void _initMidi() {
@@ -115,21 +109,6 @@ class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
     }
   }
 
-  void _generateNewTargetChord() {
-    final random = Random();
-    final chordInfo = _chordDatabase[random.nextInt(_chordDatabase.length)];
-    
-    int rootNote = chordInfo['root'];
-    List<int> intervals = chordInfo['intervals'];
-
-    setState(() {
-      _targetChordName = chordInfo['display'];
-      _targetChordNotes = intervals.map((interval) => rootNote + interval).toList();
-      _feedbackMessage = '¡Toca el acorde de $_targetChordName!';
-      _feedbackColor = Colors.cyanAccent;
-    });
-  }
-
   void _processMidiPacket(MidiPacket packet) {
     final List<int> data = packet.data;
     if (data.length < 3) return;
@@ -141,34 +120,72 @@ class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
     setState(() {
       if (status == 0x90 && velocity > 0) {
         _activeNotes.add(noteNumber);
-        _evaluateChord();
+        _playLocalNote(noteNumber);
+        _evaluateSongProgress(noteNumber);
       } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
         _activeNotes.remove(noteNumber);
       }
     });
   }
 
-  /// Compara si el conjunto de notas presionadas coincide exactamente con el acorde objetivo
-  void _evaluateChord() {
-    if (_targetChordNotes.isEmpty) return;
+  void _playLocalNote(int noteNumber) {
+    if (_isSoundLoaded) {
+      _flutterMidi.playMidiNote(midi: noteNumber);
+    }
+  }
 
-    // Verificamos si todas las notas del acorde objetivo están contenidas en las notas activas
-    bool matches = _targetChordNotes.every((note) => _activeNotes.contains(note)) &&
-                   _activeNotes.length == _targetChordNotes.length;
+  /// Evalúa si el usuario tocó la nota exacta que correspondía en la canción
+  void _evaluateSongProgress(int playedNote) {
+    if (_songCompleted) return;
 
-    if (matches) {
+    int expectedNote = _songNotes[_currentNoteIndex];
+
+    if (playedNote == expectedNote) {
+      // ¡Nota correcta! Avanzamos en la canción
       setState(() {
-        _score += 20;
-        _feedbackMessage = '¡Acorde Correcto! 🎉';
-        _feedbackColor = Colors.greenAccent;
-      });
-
-      Timer(const Duration(milliseconds: 800), () {
-        if (mounted) {
-          _generateNewTargetChord();
+        _currentNoteIndex++;
+        if (_currentNoteIndex >= _songNotes.length) {
+          _songCompleted = true;
+          _feedbackMessage = '¡Felicidades! Has completado la canción 🏆';
+          _feedbackColor = Colors.greenAccent;
+        } else {
+          _feedbackMessage = '¡Bien! Siguiente nota...';
+          _feedbackColor = Colors.greenAccent;
         }
       });
+    } else {
+      // Nota incorrecta
+      setState(() {
+        _feedbackMessage = 'Ups, esperábamos ${_songNoteNames[_currentNoteIndex]}. ¡Inténtalo de nuevo!';
+        _feedbackColor = Colors.orangeAccent;
+      });
     }
+  }
+
+  void _resetSong() {
+    setState(() {
+      _currentNoteIndex = 0;
+      _songCompleted = false;
+      _feedbackMessage = 'Toca la primera nota de la canción';
+      _feedbackColor = Colors.cyanAccent;
+    });
+  }
+
+  /// Permite tocar desde la pantalla táctil para probar sin piano físico
+  void _onVirtualKeyPressed(int noteNumber) {
+    setState(() {
+      _activeNotes.add(noteNumber);
+    });
+    _playLocalNote(noteNumber);
+    _evaluateSongProgress(noteNumber);
+
+    Timer(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        setState(() {
+          _activeNotes.remove(noteNumber);
+        });
+      }
+    });
   }
 
   @override
@@ -180,19 +197,17 @@ class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    int? targetNote = _songCompleted ? null : _songNotes[_currentNoteIndex];
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Entrenador de Acordes - Fase 4'),
+        title: const Text('Práctica de Canciones - Fase 6'),
         centerTitle: true,
         actions: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: Text(
-                'Puntuación: $_score',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.amberAccent),
-              ),
-            ),
+          IconButton(
+            icon: const Icon(Icons.refresh_rounded),
+            onPressed: _resetSong,
+            tooltip: 'Reiniciar Canción',
           ),
         ],
       ),
@@ -203,37 +218,48 @@ class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
             child: _buildConnectionStatusCard(),
           ),
           Expanded(
-            flex: 2,
             child: Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Text(
-                    'ACORDE OBJETIVO:',
-                    style: TextStyle(fontSize: 14, color: Colors.grey, letterSpacing: 1.5),
+                    'CANCIÓN: ESTRELLITA DÓNDE ESTÁS',
+                    style: TextStyle(fontSize: 13, color: Colors.grey, letterSpacing: 1.2),
                   ),
                   const SizedBox(height: 12),
+                  // Progreso de la canción
                   Text(
-                    _targetChordName ?? '--',
-                    style: const TextStyle(fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
+                    _songCompleted ? '¡Completada!' : 'Nota ${_currentNoteIndex + 1} de ${_songNotes.length}',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.amberAccent),
                   ),
                   const SizedBox(height: 24),
+                  // Nota actual a tocar en grande
                   Text(
-                    _feedbackMessage,
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: _feedbackColor),
-                    textAlign: TextAlign.center,
+                    _songCompleted ? '🌟' : '${_songNoteNames[_currentNoteIndex]}',
+                    style: const TextStyle(fontSize: 64, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  const SizedBox(height: 16),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Text(
+                      _feedbackMessage,
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: _feedbackColor),
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                 ],
               ),
             ),
           ),
+          // Teclado virtual interactivo que resalta la nota objetivo de la canción
           Container(
-            height: 200,
+            height: 220,
             padding: const EdgeInsets.symmetric(vertical: 12),
             color: Colors.black54,
-            child: InteractivePianoKeyboard(
+            child: InteractiveSongPianoKeyboard(
               activeNotes: _activeNotes,
-              targetNotes: _targetChordNotes,
+              targetNote: targetNote,
+              onKeyPressed: _onVirtualKeyPressed,
             ),
           ),
         ],
@@ -244,32 +270,39 @@ class _ChordTrainerScreenState extends State<ChordTrainerScreen> {
   Widget _buildConnectionStatusCard() {
     return Card(
       elevation: 2,
-      color: _isConnected ? Colors.green.withOpacity(0.15) : Colors.red.withOpacity(0.15),
+      color: _isConnected ? Colors.green.withOpacity(0.15) : Colors.orange.withOpacity(0.15),
       child: ListTile(
         leading: Icon(
-          _isConnected ? Icons.usb_rounded : Icons.usb_off_rounded,
-          color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+          _isConnected ? Icons.usb_rounded : Icons.info_outline_rounded,
+          color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
         ),
         title: Text(
-          _isConnected ? 'Piano Conectado: ${_connectedDevice?.name ?? ""}' : 'Modo simulación / Sin piano USB',
+          _isConnected ? 'Piano USB Conectado' : 'Modo Táctil / Sin cable USB',
           style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+        ),
+        subtitle: Text(
+          _isConnected ? (_connectedDevice?.name ?? '') : 'Toca la pantalla o conecta tu piano por USB',
+          style: const TextStyle(fontSize: 11),
         ),
       ),
     );
   }
 }
 
-class InteractivePianoKeyboard extends StatelessWidget {
+/// Teclado virtual optimizado para la práctica de canciones
+class InteractiveSongPianoKeyboard extends StatelessWidget {
   final Set<int> activeNotes;
-  final List<int> targetNotes;
+  final int? targetNote;
+  final ValueChanged<int> onKeyPressed;
 
-  static const int startNote = 60;
-  static const int totalKeys = 25;
+  static const int startNote = 60; // C4
+  static const int totalKeys = 25;  // 2 octavas
 
-  const InteractivePianoKeyboard({
+  const InteractiveSongPianoKeyboard({
     super.key,
     required this.activeNotes,
-    required this.targetNotes,
+    required this.targetNote,
+    required this.onKeyPressed,
   });
 
   @override
@@ -294,29 +327,39 @@ class InteractivePianoKeyboard extends StatelessWidget {
             Row(
               children: whiteKeys.map((noteNumber) {
                 bool isActive = activeNotes.contains(noteNumber);
-                bool isTarget = targetNotes.contains(noteNumber);
+                bool isTarget = targetNote == noteNumber;
 
                 Color keyColor = Colors.white;
                 if (isActive) {
                   keyColor = Colors.deepPurpleAccent;
                 } else if (isTarget) {
-                  keyColor = Colors.cyan.shade100;
+                  keyColor = Colors.cyan.shade200; // Resalta la nota que debes tocar en la canción
                 }
 
-                return Container(
-                  width: whiteKeyWidth,
-                  height: whiteKeyHeight,
-                  margin: const EdgeInsets.symmetric(horizontal: 1),
-                  decoration: BoxDecoration(
-                    color: keyColor,
-                    borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
-                    border: Border.all(color: isTarget ? Colors.cyan : Colors.grey.shade400, width: 1),
-                  ),
-                  alignment: Alignment.bottomCenter,
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Text(
-                    _getNoteLabel(noteNumber),
-                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.black87),
+                return GestureDetector(
+                  onTapDown: (_) => onKeyPressed(noteNumber),
+                  child: Container(
+                    width: whiteKeyWidth,
+                    height: whiteKeyHeight,
+                    margin: const EdgeInsets.symmetric(horizontal: 1),
+                    decoration: BoxDecoration(
+                      color: keyColor,
+                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
+                      border: Border.all(
+                        color: isTarget ? Colors.cyan : Colors.grey.shade400,
+                        width: isTarget ? 2 : 1,
+                      ),
+                    ),
+                    alignment: Alignment.bottomCenter,
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      _getNoteLabel(noteNumber),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: isTarget ? Colors.black87 : Colors.black87,
+                      ),
+                    ),
                   ),
                 );
               }).toList(),
@@ -350,28 +393,31 @@ class InteractivePianoKeyboard extends StatelessWidget {
       if (_isBlackKey(note)) {
         double leftPosition = (whiteIndex * whiteWidth) - (blackWidth / 2) + (whiteWidth * 0.7);
         bool isActive = activeNotes.contains(note);
-        bool isTarget = targetNotes.contains(note);
+        bool isTarget = targetNote == note;
 
         Color blackColor = Colors.black;
         if (isActive) {
           blackColor = Colors.cyanAccent;
         } else if (isTarget) {
-          blackColor = Colors.orange.shade300;
+          blackColor = Colors.orange.shade350;
         }
 
         blackKeyWidgets.add(
           Positioned(
             left: leftPosition,
             top: 0,
-            child: Container(
-              width: blackWidth,
-              height: blackHeight,
-              decoration: BoxDecoration(
-                color: blackColor,
-                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4)),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 3, offset: const Offset(0, 2)),
-                ],
+            child: GestureDetector(
+              onTapDown: (_) => onKeyPressed(note),
+              child: Container(
+                width: blackWidth,
+                height: blackHeight,
+                decoration: BoxDecoration(
+                  color: blackColor,
+                  borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4)),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 3, offset: const Offset(0, 2)),
+                  ],
+                ),
               ),
             ),
           ),
