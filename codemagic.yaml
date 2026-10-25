@@ -8,16 +8,8 @@ workflows:
     scripts:
       - name: Get dependencies
         script: flutter pub get
-      - name: Build iOS without strict codesign
+      - name: Build iOS App for Sideloading
         script: |
-          flutter build ios --release --no-codesign
-      - name: Package IPA for Sideloadly
-        script: |
-          mkdir -p build/ios/ipa
-          cd build/ios/iphoneos
-          # Crea la estructura Payload para que Sideloadly lo reconozca
-          mkdir Payload
-          mv Runner.app Payload/
-          zip -r ../ipa/piano_app.ipa Payload
+          flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
